@@ -21,6 +21,38 @@ export function createChat(db, { json, body, userFor, sessionToken, hash }) {
     );
     CREATE INDEX IF NOT EXISTS messages_conversation_id ON messages(conversation_id, id);
   `);
+  // Upgrade existing direct-chat databases without losing message IDs or history.
+  if (!db.prepare('PRAGMA table_info(conversations)').all().some(column => column.name === 'kind')) {
+    db.exec('PRAGMA foreign_keys=OFF; BEGIN IMMEDIATE;');
+    try {
+      db.exec(`CREATE TABLE conversations_next (
+        id TEXT PRIMARY KEY,
+        user_a TEXT REFERENCES users(id), user_b TEXT REFERENCES users(id),
+        created_at INTEGER NOT NULL,
+        kind TEXT NOT NULL CHECK(kind IN ('direct','group')),
+        title TEXT, created_by TEXT NOT NULL REFERENCES users(id),
+        UNIQUE(user_a,user_b),
+        CHECK((kind='direct' AND user_a IS NOT NULL AND user_b IS NOT NULL AND user_a<user_b)
+           OR (kind='group' AND user_a IS NULL AND user_b IS NULL AND length(title) BETWEEN 1 AND 60))
+      );
+      INSERT INTO conversations_next SELECT id,user_a,user_b,created_at,'direct',NULL,user_a FROM conversations;
+      DROP TABLE conversations;
+      ALTER TABLE conversations_next RENAME TO conversations;`);
+      if (db.prepare('PRAGMA foreign_key_check').all().length) throw Error('Conversation migration failed integrity check');
+      db.exec('COMMIT;');
+    } catch (error) { db.exec('ROLLBACK;'); throw error; }
+    finally { db.exec('PRAGMA foreign_keys=ON;'); }
+  }
+  db.exec(`CREATE TABLE IF NOT EXISTS conversation_members (
+    conversation_id TEXT NOT NULL REFERENCES conversations(id),
+    user_id TEXT NOT NULL REFERENCES users(id), PRIMARY KEY(conversation_id,user_id)
+  );
+  CREATE INDEX IF NOT EXISTS conversation_members_user ON conversation_members(user_id,conversation_id);
+  INSERT OR IGNORE INTO conversation_members SELECT id,user_a FROM conversations WHERE kind='direct';
+  INSERT OR IGNORE INTO conversation_members SELECT id,user_b FROM conversations WHERE kind='direct';`);
+  function members(id) {
+    return db.prepare('SELECT u.id,u.name FROM conversation_members m JOIN users u ON u.id=m.user_id WHERE m.conversation_id=? ORDER BY u.name,u.id').all(id);
+  }
   const streams = new Set();
   const rates = new Map();
   function notify(ids) {
@@ -44,7 +76,7 @@ export function createChat(db, { json, body, userFor, sessionToken, hash }) {
     for (const [id, value] of rates) if (value.until < Date.now()) rates.delete(id);
   }, 15000); timer.unref();
   function member(id, userId) {
-    return db.prepare('SELECT * FROM conversations WHERE id=? AND (user_a=? OR user_b=?)').get(id, userId, userId);
+    return db.prepare('SELECT c.* FROM conversations c JOIN conversation_members m ON m.conversation_id=c.id WHERE c.id=? AND m.user_id=?').get(id, userId);
   }
   async function route(req, res, url) {
     const path = url.pathname;
@@ -69,22 +101,54 @@ export function createChat(db, { json, body, userFor, sessionToken, hash }) {
       json(res, 200, { users }); return true;
     }
     if (path === '/api/conversations' && req.method === 'GET') {
-      const conversations = db.prepare(`SELECT c.id,c.created_at,u.id AS peer_id,u.name AS peer_name,
+      const conversations = db.prepare(`SELECT c.id,c.created_at,c.kind,c.title,c.created_by,
         (SELECT text FROM messages WHERE conversation_id=c.id ORDER BY id DESC LIMIT 1) AS last_text,
         (SELECT created_at FROM messages WHERE conversation_id=c.id ORDER BY id DESC LIMIT 1) AS last_at
-        FROM conversations c JOIN users u ON u.id=CASE WHEN c.user_a=? THEN c.user_b ELSE c.user_a END
-        WHERE c.user_a=? OR c.user_b=? ORDER BY COALESCE(last_at,c.created_at) DESC,c.id`).all(user.id, user.id, user.id);
+        FROM conversations c JOIN conversation_members m ON m.conversation_id=c.id
+        WHERE m.user_id=? ORDER BY COALESCE(last_at,c.created_at) DESC,c.id`).all(user.id).map(c => {
+          const participants = members(c.id), peer = participants.find(p => p.id !== user.id);
+          return { ...c, peer_id: c.kind === 'direct' ? peer.id : null,
+            peer_name: c.kind === 'group' ? c.title : peer.name,
+            member_count: participants.length, members: participants };
+        });
       json(res, 200, { conversations }); return true;
     }
     if (path === '/api/conversations' && req.method === 'POST') {
       const data = await body(req);
-      if (typeof data.userId !== 'string' || data.userId === user.id || !db.prepare('SELECT id FROM users WHERE id=?').get(data.userId)) {
+      if (data.kind === 'group') {
+        const title = typeof data.title === 'string' ? data.title.trim() : '';
+        if (!title || title.length > 60 || !Array.isArray(data.userIds) || data.userIds.length < 2 || data.userIds.length > 49 || data.userIds.some(id => typeof id !== 'string')) {
+          json(res, 400, { error: '방 이름(1~60자)과 초대할 친구 2~49명을 선택해 주세요.' }); return true;
+        }
+        const ids = [...new Set([user.id, ...data.userIds])];
+        if (ids.length !== data.userIds.length + 1 || ids.some(id => !db.prepare('SELECT id FROM users WHERE id=?').get(id))) {
+          json(res, 400, { error: '중복되지 않은 가입자를 선택해 주세요. 본인은 자동 포함됩니다.' }); return true;
+        }
+        const id = randomBytes(16).toString('hex');
+        db.exec('BEGIN IMMEDIATE;');
+        try {
+          db.prepare("INSERT INTO conversations(id,created_at,kind,title,created_by) VALUES(?,?,'group',?,?)").run(id, Date.now(), title, user.id);
+          for (const userId of ids) db.prepare('INSERT INTO conversation_members VALUES(?,?)').run(id, userId);
+          db.exec('COMMIT;');
+        } catch (error) { db.exec('ROLLBACK;'); throw error; }
+        notify(ids); json(res, 201, { conversation: { id } }); return true;
+      }
+      if ((data.kind !== undefined && data.kind !== 'direct') || typeof data.userId !== 'string' || data.userId === user.id || !db.prepare('SELECT id FROM users WHERE id=?').get(data.userId)) {
         json(res, 400, { error: '대화할 상대방을 선택해 주세요.' }); return true;
       }
       const [a, b] = [user.id, data.userId].sort();
-      const inserted = db.prepare('INSERT OR IGNORE INTO conversations VALUES(?,?,?,?)').run(randomBytes(16).toString('hex'), a, b, Date.now());
-      const conversation = db.prepare('SELECT id FROM conversations WHERE user_a=? AND user_b=?').get(a, b);
-      notify([a, b]); json(res, inserted.changes ? 201 : 200, { conversation }); return true;
+      let conversation = db.prepare("SELECT id FROM conversations WHERE kind='direct' AND user_a=? AND user_b=?").get(a, b);
+      const created = !conversation;
+      if (created) {
+        const id = randomBytes(16).toString('hex');
+        db.exec('BEGIN IMMEDIATE;');
+        try {
+          db.prepare("INSERT INTO conversations(id,user_a,user_b,created_at,kind,created_by) VALUES(?,?,?,?,'direct',?)").run(id, a, b, Date.now(), user.id);
+          for (const userId of [a,b]) db.prepare('INSERT INTO conversation_members VALUES(?,?)').run(id, userId);
+          db.exec('COMMIT;'); conversation = { id };
+        } catch (error) { db.exec('ROLLBACK;'); throw error; }
+      }
+      notify([a, b]); json(res, created ? 201 : 200, { conversation }); return true;
     }
     const match = path.match(/^\/api\/conversations\/([a-f0-9]{32})\/messages$/);
     if (match && ['GET', 'POST'].includes(req.method)) {
@@ -114,7 +178,7 @@ export function createChat(db, { json, body, userFor, sessionToken, hash }) {
       if (++rate.count > 120) { res.setHeader('Retry-After', '60'); json(res, 429, { error: '메시지를 너무 빠르게 보내고 있습니다. 잠시 후 다시 시도해 주세요.' }); return true; }
       const result = db.prepare('INSERT INTO messages(conversation_id,sender_id,client_id,text,created_at) VALUES(?,?,?,?,?)').run(conversation.id, user.id, data.clientId, text, Date.now());
       const message = db.prepare('SELECT id,sender_id,text,created_at FROM messages WHERE id=?').get(result.lastInsertRowid);
-      notify([conversation.user_a, conversation.user_b]);
+      notify(members(conversation.id).map(member => member.id));
       json(res, 201, { message }); return true;
     }
     json(res, 404, { error: '요청을 찾을 수 없습니다.' }); return true;

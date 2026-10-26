@@ -3,6 +3,8 @@ let account = null, conversations = [], active = null, source = null;
 let generation = 0, syncRunning = false, syncAgain = false, sending = false;
 let selectionVersion = 0, searchVersion = 0, pendingSend = null;
 const histories = new Map();
+let roomMode = 'direct', groupCreating = false;
+const selectedMembers = new Map();
 const current = () => conversations.find(c => c.id === active);
 const clock = value => new Intl.DateTimeFormat('ko-KR', { hour: 'numeric', minute: '2-digit' }).format(new Date(value));
 function element(tag, className, text) {
@@ -32,9 +34,9 @@ function renderList() {
   for (const c of conversations.filter(c => c.peer_name.toLowerCase().includes(query))) {
     const button = element('button', 'contact' + (c.id === active ? ' active' : ''));
     button.setAttribute('aria-pressed', String(c.id === active));
-    const face = element('span', 'avatar'); avatar(face, c.peer_name);
+    const face = element('span', 'avatar'); avatar(face, c.kind === 'group' ? '♧' : c.peer_name);
     const body = element('div', 'contact-body'), top = element('div', 'contact-top');
-    top.append(element('strong', '', c.peer_name), element('time', '', clock(c.last_at || c.created_at)));
+    top.append(element('strong', '', c.peer_name + (c.kind === 'group' ? ` · ${c.member_count}` : '')), element('time', '', clock(c.last_at || c.created_at)));
     body.append(top, element('p', '', c.last_text || '첫 인사를 건네보세요 👋'));
     button.append(face, body); button.onclick = () => selectConversation(c.id);
     list.append(button);
@@ -59,9 +61,10 @@ function renderMessages({ bottom = false } = {}) {
     const date = new Date(message.created_at).toLocaleDateString('ko-KR');
     if (date !== lastDate) { log.append(element('div', 'date', date)); lastDate = date; }
     const own = message.sender_id === account.id, row = element('div', 'message' + (own ? ' own' : ''));
-    if (!own) { const face = element('span', 'avatar'); avatar(face, c.peer_name); row.append(face); }
+    const senderName = c.members?.find(member => member.id === message.sender_id)?.name || c.peer_name;
+    if (!own) { const face = element('span', 'avatar'); avatar(face, senderName); row.append(face); }
     const content = element('div', 'message-content');
-    if (!own) content.append(element('div', 'sender', c.peer_name));
+    if (!own) content.append(element('div', 'sender', senderName));
     content.append(element('div', 'bubble', message.text), element('time', '', clock(message.created_at)));
     row.dataset.messageId = message.id; row.append(content); log.append(row);
   }
@@ -71,10 +74,13 @@ function renderHeader() {
   const c = current();
   $('#contact-name').textContent = c?.peer_name || '새로운 대화';
   $('#profile-name').textContent = c?.peer_name || 'Pingo';
-  $('#profile-handle').textContent = c ? '대화 참여자' : '가까워지는 대화';
-  $('#profile-about').textContent = c ? '두 사람만 참여하는 대화입니다. 기록은 서버에 저장되어 다시 로그인해도 이어집니다.' : '가입한 친구를 검색하고 대화를 시작하세요.';
-  $('#contact-status').textContent = c ? '1:1 채팅' : '친구를 찾아보세요';
-  avatar($('#header-avatar'), c?.peer_name); avatar($('#profile-avatar'), c?.peer_name);
+  $('#profile-handle').textContent = c ? (c.kind === 'group' ? `단체 대화 · ${c.member_count}명` : '1:1 대화') : '가까워지는 대화';
+  $('#profile-about').textContent = c ? (c.kind === 'group' ? '함께 나누는 이야기, 더 가까워지는 우리. 참여자만 대화 기록에 접근할 수 있어요.' : '두 사람만 참여하는 대화입니다. 기록은 서버에 저장되어 다시 로그인해도 이어집니다.') : '가입한 친구를 검색하고 대화를 시작하세요.';
+  $('#contact-status').textContent = c ? (c.kind === 'group' ? `단체 채팅 · ${c.member_count}명` : '1:1 채팅') : '친구를 찾아보세요';
+  $('#view-members').hidden = !c;
+  $('#view-members').textContent = c ? `참여자 ${c.member_count}` : '참여자';
+  renderMembers();
+  avatar($('#header-avatar'), c?.kind === 'group' ? '♧' : c?.peer_name); avatar($('#profile-avatar'), c?.kind === 'group' ? '♧' : c?.peer_name);
   $('#message-input').disabled = !c; $('#send').disabled = !c || sending;
 }
 function mergeHistory(id, data) {
@@ -161,6 +167,10 @@ function clearAccount() {
   $('#friend-results').replaceChildren(); $('#friend-error').textContent = ''; $('#emoji-picker').hidden = true;
   $('#retry-sync').hidden = true; chatError(); $('.shell').classList.remove('chat-open');
   if ($('#new-dialog').open) $('#new-dialog').close();
+  if ($('#members-dialog').open) $('#members-dialog').close();
+  selectedMembers.clear(); groupCreating = false;
+  $('#direct-mode').disabled = false; $('#group-mode').disabled = false;
+  $('#member-list').replaceChildren(); $('#members-dialog-list').replaceChildren();
 }
 $('#composer').onsubmit = async event => {
   event.preventDefault(); if (!account || !active || sending) return;
@@ -183,11 +193,11 @@ $('#message-input').oninput = event => { event.target.style.height = 'auto'; eve
 $('#search').oninput = renderList;
 document.addEventListener('keydown', e => { if ((e.metaKey || e.ctrlKey) && e.key === 'k') { e.preventDefault(); $('#search').focus(); } });
 document.querySelectorAll('[data-tab]').forEach(button => button.onclick = () => {
-  if (button.dataset.tab === 'friends') { $('#new-dialog').showModal(); return; }
+  if (button.dataset.tab === 'friends') { openNewConversation(); return; }
   $('#search').value = ''; renderList();
 });
 $('#back').onclick = () => $('.shell').classList.remove('chat-open');
-$('.new-chat').onclick = () => { $('#new-dialog').showModal(); $('#friend-name').focus(); };
+$('.new-chat').onclick = openNewConversation;
 $('#retry-sync').onclick = () => { connectEvents(); synchronize(); };
 $('#new-dialog').addEventListener('close', () => { searchVersion++; });
 $('#add-friend').onsubmit = async event => {
@@ -198,8 +208,17 @@ $('#add-friend').onsubmit = async event => {
     if (epoch !== generation || version !== searchVersion) return;
     $('#friend-error').textContent = users.length ? '대화할 친구를 선택하세요.' : '가입한 친구를 찾지 못했어요. 이름 또는 정확한 이메일을 확인해 주세요.';
     for (const user of users) {
-      const button = element('button', 'friend-result', user.name + ' · 대화 시작 ↗');
+      const button = element('button', 'friend-result', '');
+      button.dataset.userId = user.id;
+      button.textContent = roomMode === 'group' ? (selectedMembers.has(user.id) ? '✓ ' : '＋ ') + user.name : user.name + ' · 대화 시작 ↗';
+      if (roomMode === 'group') button.setAttribute('aria-pressed', String(selectedMembers.has(user.id)));
       button.onclick = async () => {
+        if (roomMode === 'group') {
+          if (selectedMembers.has(user.id)) selectedMembers.delete(user.id);
+          else if (selectedMembers.size < 49) selectedMembers.set(user.id, user);
+          else { $('#friend-error').textContent = '친구는 최대 49명까지 선택할 수 있어요.'; return; }
+          updateGroupSelection(); return;
+        }
         button.disabled = true;
         try {
           const { conversation } = await chatRequest('conversations', { userId: user.id });
@@ -221,3 +240,67 @@ for (const emoji of ['😊', '💙', '✨', '👋', '😂', '☕', '🌿', '🎉
 $('#emoji-button').onclick = () => { if (active) $('#emoji-picker').hidden = !$('#emoji-picker').hidden; };
 window.addEventListener('online', () => { if (account) { connectEvents(); synchronize(); } });
 document.addEventListener('visibilitychange', () => { if (!document.hidden && account) synchronize(); });
+
+function renderMembers() {
+  for (const target of [$('#member-list'), $('#members-dialog-list')]) {
+    target.replaceChildren();
+    for (const member of current()?.members || []) {
+      const row = element('div', 'member-row');
+      const face = element('span', 'member-face'); avatar(face, member.name);
+      row.append(face, element('span', '', member.name + (member.id === account?.id ? ' (나)' : '')));
+      target.append(row);
+    }
+  }
+  $('#members-title').textContent = current() ? `참여자 ${current().member_count}명` : '참여자';
+}
+function openNewConversation() {
+  setRoomMode('direct'); $('#group-title').value = ''; $('#friend-name').value = '';
+  $('#new-dialog').showModal(); $('#friend-name').focus();
+}
+function setRoomMode(mode) {
+  if (groupCreating) return;
+  roomMode = mode; searchVersion++; selectedMembers.clear();
+  $('#direct-mode').setAttribute('aria-pressed', String(mode === 'direct'));
+  $('#group-mode').setAttribute('aria-pressed', String(mode === 'group'));
+  $('#group-options').hidden = mode !== 'group'; $('#create-group').hidden = mode !== 'group';
+  $('#friend-results').replaceChildren(); $('#friend-error').textContent = '';
+  updateGroupSelection();
+}
+function updateGroupSelection() {
+  $('#selected-members').replaceChildren();
+  for (const user of selectedMembers.values()) {
+    const chip = element('button', 'member-chip', user.name + ' ×'); chip.type = 'button';
+    chip.setAttribute('aria-label', user.name + ' 선택 해제');
+    chip.disabled = groupCreating;
+    chip.onclick = () => { selectedMembers.delete(user.id); updateGroupSelection(); };
+    $('#selected-members').append(chip);
+  }
+  if (roomMode === 'group') for (const button of document.querySelectorAll('.friend-result')) {
+    const selected = selectedMembers.has(button.dataset.userId);
+    const text = button.textContent.replace(/^[✓＋] /, '');
+    button.textContent = (selected ? '✓ ' : '＋ ') + text;
+    button.setAttribute('aria-pressed', String(selected)); button.disabled = groupCreating;
+  }
+  $('#create-group').disabled = groupCreating || selectedMembers.size < 2 || !$('#group-title').value.trim();
+  $('#create-group').textContent = groupCreating ? '만드는 중…' : `단체 대화 만들기 · ${selectedMembers.size + 1}명`;
+}
+$('#direct-mode').onclick = () => setRoomMode('direct');
+$('#group-mode').onclick = () => setRoomMode('group');
+$('#group-title').oninput = updateGroupSelection;
+$('#view-members').onclick = () => { renderMembers(); $('#members-dialog').showModal(); };
+$('#create-group').onclick = async () => {
+  if (groupCreating || selectedMembers.size < 2 || !$('#group-title').value.trim()) return;
+  const epoch = generation;
+  groupCreating = true; updateGroupSelection();
+  $('#direct-mode').disabled = true; $('#group-mode').disabled = true;
+  try {
+    const { conversation } = await chatRequest('conversations', { kind: 'group', title: $('#group-title').value.trim(), userIds: [...selectedMembers.keys()] });
+    if (epoch !== generation) return;
+    const { conversations: list } = await chatRequest('conversations');
+    if (epoch !== generation) return;
+    conversations = list; $('#new-dialog').close(); selectConversation(conversation.id);
+  } catch (error) { if (epoch === generation) $('#friend-error').textContent = error.message; }
+  finally {
+    if (epoch === generation) { groupCreating = false; updateGroupSelection(); $('#direct-mode').disabled = false; $('#group-mode').disabled = false; }
+  }
+};

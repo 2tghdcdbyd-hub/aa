@@ -5,9 +5,10 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { once } from 'node:events';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
+import { DatabaseSync } from 'node:sqlite';
 
-test('private live conversations, idempotent sends, paging and durable history', { timeout: 30000 }, async () => {
+test('direct and group live chat, membership, history and legacy migration', { timeout: 30000 }, async () => {
   const dir = await mkdtemp(join(tmpdir(), 'pingo-chat-'));
   const port = 45000 + Math.floor(Math.random() * 10000), base = `http://127.0.0.1:${port}`;
   let child; const controllers = [];
@@ -35,7 +36,22 @@ test('private live conversations, idempotent sends, paging and durable history',
     } };
   }
   try {
+    // A real pre-group schema exercises the automatic upgrade and preserves old IDs/history.
+    const legacy = new DatabaseSync(join(dir, 'chat.sqlite'));
+    legacy.exec(`CREATE TABLE users(id TEXT PRIMARY KEY,email TEXT UNIQUE NOT NULL,name TEXT NOT NULL,salt TEXT NOT NULL,password_hash TEXT NOT NULL);
+      CREATE TABLE sessions(token_hash TEXT PRIMARY KEY,user_id TEXT NOT NULL REFERENCES users(id),expires INTEGER NOT NULL);
+      CREATE TABLE conversations(id TEXT PRIMARY KEY,user_a TEXT NOT NULL REFERENCES users(id),user_b TEXT NOT NULL REFERENCES users(id),created_at INTEGER NOT NULL,UNIQUE(user_a,user_b),CHECK(user_a<user_b));
+      CREATE TABLE messages(id INTEGER PRIMARY KEY AUTOINCREMENT,conversation_id TEXT NOT NULL REFERENCES conversations(id),sender_id TEXT NOT NULL REFERENCES users(id),client_id TEXT NOT NULL,text TEXT NOT NULL,created_at INTEGER NOT NULL,UNIQUE(sender_id,client_id));
+      INSERT INTO users VALUES('legacy-a','legacy-a@example.com','예전 사용자 A','unused','unused'),('legacy-b','legacy-b@example.com','예전 사용자 B','unused','unused');
+      INSERT INTO conversations VALUES('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','legacy-a','legacy-b',1);
+      INSERT INTO messages VALUES(1,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','legacy-a','legacy-message-id','보존할 기존 대화',1);`);
+    legacy.prepare('INSERT INTO sessions VALUES(?,?,?)').run(createHash('sha256').update('legacy-token').digest('hex'), 'legacy-a', Date.now()+60000);
+    legacy.close();
     await start();
+    const oldPath = 'conversations/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/messages';
+    const oldHistory = await request(oldPath, 'pingo_session=legacy-token').then(r => r.json());
+    assert.equal(oldHistory.messages[0].text, '보존할 기존 대화'); assert.equal(oldHistory.messages[0].id, 1);
+    assert.equal((await request('conversations', 'pingo_session=legacy-token').then(r => r.json())).conversations[0].members.length, 2);
     const alice = await signup('앨리스', 'alice@example.com'), bob = await signup('밥친구', 'bob@example.com'), eve = await signup('이브', 'eve@example.com');
     assert.equal((await request('conversations')).status, 401); assert.equal((await request('events')).status, 401);
     assert.equal((await request('users?q=alice@example.com', bob.cookie).then(r => r.json())).users[0].id, alice.user.id);
@@ -68,5 +84,38 @@ test('private live conversations, idempotent sends, paging and durable history',
     controllers.forEach(c => c.abort()); await stop(); await start();
     const restored = await request(path, alice.cookie).then(r => r.json()); assert.equal(restored.messages.length, 50); assert.equal(restored.messages.at(-1).text, 'message-53');
     assert.equal((await request(path, eve.cookie)).status, 404);
+    const bobLogin = await request('login', null, { email: 'bob@example.com', password: 'test-password-12345' });
+    bob.cookie = bobLogin.headers.get('set-cookie').split(';')[0];
+    const outsider = await signup('외부 사용자', 'outsider@example.com');
+    const groupData = { kind: 'group', title: '우리 모임', userIds: [bob.user.id, eve.user.id] };
+    for (const invalid of [
+      { ...groupData, title: ' ' }, { ...groupData, title: 'x'.repeat(61) },
+      { ...groupData, userIds: [bob.user.id] }, { ...groupData, userIds: [bob.user.id,bob.user.id] },
+      { ...groupData, userIds: [alice.user.id,bob.user.id] }, { ...groupData, userIds: [bob.user.id,'unknown-user'] },
+      { ...groupData, userIds: Array(50).fill(bob.user.id) }
+    ]) assert.equal((await request('conversations', alice.cookie, invalid)).status, 400);
+    const groupResponse = await request('conversations', alice.cookie, groupData); assert.equal(groupResponse.status, 201);
+    const groupId = (await groupResponse.json()).conversation.id, groupPath = `conversations/${groupId}/messages`;
+    for (const person of [alice,bob,eve]) {
+      const group = (await request('conversations', person.cookie).then(r => r.json())).conversations.find(c => c.id === groupId);
+      assert.equal(group.kind,'group'); assert.equal(group.title,'우리 모임'); assert.equal(group.member_count,3);
+      assert.deepEqual(group.members.map(m=>m.id).sort(),[alice.user.id,bob.user.id,eve.user.id].sort());
+    }
+    const bobLive = await stream(bob.cookie), eveLive = await stream(eve.cookie);
+    await bobLive.nextEvent(); await eveLive.nextEvent();
+    for (const person of [alice,bob,eve]) {
+      const response=await request(groupPath,person.cookie,{text:person.user.name+'의 단체 메시지',clientId:randomUUID()});
+      assert.equal(response.status,201); assert.equal((await response.json()).message.sender_id,person.user.id);
+    }
+    assert.match(await bobLive.nextEvent(),/event: sync/); assert.match(await eveLive.nextEvent(),/event: sync/);
+    for (const person of [alice,bob,eve]) assert.equal((await request(groupPath,person.cookie).then(r=>r.json())).messages.length,3);
+    assert.equal((await request(groupPath,outsider.cookie)).status,404);
+    assert.equal((await request(groupPath,outsider.cookie,{text:'침입',clientId:randomUUID()})).status,404);
+    assert.equal((await request('conversations',outsider.cookie).then(r=>r.json())).conversations.length,0);
+    controllers.forEach(c=>c.abort()); await stop(); await start();
+    assert.equal((await request(groupPath,eve.cookie).then(r=>r.json())).messages.length,3);
+    assert.equal((await request(oldPath,'pingo_session=legacy-token').then(r=>r.json())).messages[0].text,'보존할 기존 대화');
+    assert.equal((await request(path,alice.cookie).then(r=>r.json())).messages.at(-1).text,'message-53');
+    const integrity=new DatabaseSync(join(dir,'chat.sqlite')); assert.equal(integrity.prepare('PRAGMA foreign_key_check').all().length,0); integrity.close();
   } finally { controllers.forEach(c => c.abort()); if (child && child.exitCode === null) await stop(); await rm(dir, { recursive: true, force: true }); }
 });
