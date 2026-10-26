@@ -1,5 +1,6 @@
 import http from 'node:http';
 import { createChat } from './chat.mjs';
+import { createRecovery } from './recovery.mjs';
 import { readFile, mkdir } from 'node:fs/promises';
 import { DatabaseSync } from 'node:sqlite';
 import { randomBytes, scrypt as scryptCallback, timingSafeEqual, createHash } from 'node:crypto';
@@ -41,7 +42,8 @@ function limited(req) {
   return ++entry.count > 30;
 }
 const chat = createChat(db, { json, body, userFor, sessionToken, hash });
-const files = { '/': ['index.html', 'text/html'], '/app.js': ['app.js', 'text/javascript'], '/auth.js': ['auth.js', 'text/javascript'], '/style.css': ['style.css', 'text/css'] };
+const recovery = createRecovery(db,{json,body,userFor,scrypt,hash,limited,revokeUser:chat.revokeUser});
+const files = { '/': ['index.html', 'text/html'], '/app.js': ['app.js', 'text/javascript'], '/auth.js': ['auth.js', 'text/javascript'], '/safety.js': ['safety.js','text/javascript'], '/style.css': ['style.css', 'text/css'] };
 const server = http.createServer(async (req, res) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Referrer-Policy', 'same-origin');
@@ -57,6 +59,7 @@ const server = http.createServer(async (req, res) => {
         if (!sameOrigin || req.headers['sec-fetch-site'] === 'cross-site') return json(res, 403, { error: '다른 사이트의 요청은 허용되지 않습니다.' });
         if (req.headers['content-type']?.split(';')[0].trim() !== 'application/json') return json(res, 415, { error: 'JSON 요청이 필요합니다.' });
       }
+      if (await recovery.route(req,res,path)) return;
       if (await chat.route(req, res, url)) return;
       if (path === '/api/me' && req.method === 'GET') { const user = userFor(req); return json(res, user ? 200 : 401, user ? { user: publicUser(user) } : { error: '로그인이 필요합니다.' }); }
       if (path === '/api/logout' && req.method === 'POST') {
@@ -79,7 +82,7 @@ const server = http.createServer(async (req, res) => {
           const user = { id: randomBytes(16).toString('hex'), email, name };
           try { db.prepare('INSERT INTO users VALUES(?,?,?,?,?)').run(user.id, email, name, salt, passwordHash); }
           catch (e) { if (e.code?.includes('SQLITE_CONSTRAINT') || e.message.includes('UNIQUE constraint')) return json(res, 409, { error: '이 이메일로 가입할 수 없습니다. 로그인하거나 다른 이메일을 사용해 주세요.' }); throw e; }
-          setSession(req, res, user); return json(res, 201, { user });
+          setSession(req, res, user); return json(res, 201, { user, recoveryCode: recovery.issue(user.id) });
         }
         const user = db.prepare('SELECT * FROM users WHERE email=?').get(email);
         const derived = await scrypt(password, user?.salt || 'pingo-missing-user-salt', 64);

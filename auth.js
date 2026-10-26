@@ -50,7 +50,7 @@ $('#auth-form').onsubmit = async event => {
   if (authMode === 'signup' && $('#auth-password').value !== $('#auth-confirm').value) { $('#auth-error').textContent = '비밀번호가 일치하지 않습니다.'; return; }
   const data = { email: $('#auth-email').value, password: $('#auth-password').value, name: $('#auth-name').value };
   busy(true); $('#auth-submit').textContent = '잠시만 기다려 주세요…';
-  try { const { user } = await api(authMode, data); showUser(user); }
+  try { const result = await api(authMode, data); showUser(result.user); if(result.recoveryCode) showRecoveryCode(result.recoveryCode); }
   catch (error) { $('#auth-error').textContent = error.message; }
   finally { busy(false); $('#auth-submit').textContent = authMode === 'signup' ? '가입하고 시작하기 ↗' : '로그인 ↗'; }
 };
@@ -69,3 +69,21 @@ $('#logout').onclick = async () => {
   catch { $('#auth-error').textContent = '로그인 상태를 확인하지 못했습니다. 다시 로그인해 주세요.'; }
   finally { busy(false); $('#auth-submit').textContent = '로그인 ↗'; }
 })();
+
+function showRecoveryCode(code){
+  $('#recovery-code-value').textContent=code; $('#recovery-copy-status').textContent='';
+  $('#recovery-code-dialog').showModal();
+}
+$('#close-recovery-code').onclick=()=>$('#recovery-code-dialog').close();
+$('#recovery-code-dialog').addEventListener('close',()=>{$('#recovery-code-value').textContent='';});
+$('#copy-recovery-code').onclick=async()=>{try{await navigator.clipboard.writeText($('#recovery-code-value').textContent);$('#recovery-copy-status').textContent='복사했습니다. 안전한 곳에 저장하세요.';}catch{$('#recovery-copy-status').textContent='자동 복사가 불가능합니다. 코드를 선택해서 직접 복사해 주세요.';}};
+$('#forgot-password').onclick=()=>{if(authBusy)return;$('#recover-form').reset();$('#recover-error').textContent='';$('#recover-dialog').showModal();};
+$('#recover-form').onsubmit=async event=>{
+  event.preventDefault();const form=event.currentTarget,button=form.querySelector('button'),data=Object.fromEntries(new FormData(form));
+  if(data.password!==data.confirm){$('#recover-error').textContent='비밀번호가 일치하지 않습니다.';return;}
+  button.disabled=true;$('#recover-error').textContent='';
+  try{await api('recover',data);$('#recover-dialog').close();form.reset();setMode('login');$('#auth-email').value=data.email;$('#auth-error').textContent='비밀번호를 변경했습니다. 모든 기기에서 로그아웃되었습니다. 새 비밀번호로 로그인하고 복구 코드를 다시 발급하세요.';}
+  catch(error){$('#recover-error').textContent=error.message;}finally{button.disabled=false;}
+};
+
+$('#recover-dialog').addEventListener('close',()=>$('#recover-form').reset());

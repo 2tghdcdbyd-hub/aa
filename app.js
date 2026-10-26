@@ -85,7 +85,9 @@ function renderMessages({ bottom = false } = {}) {
     const content = element('div', 'message-content');
     if (!own) content.append(element('div', 'sender', senderName));
     content.append(element('div', 'bubble', message.text), element('time', '', clock(message.created_at)));
-    row.dataset.messageId = message.id; row.append(content); log.append(row);
+    row.dataset.messageId = message.id; row.append(content);
+    if(!own){const report=element('button','message-report','⚑');report.type='button';report.setAttribute('aria-label', senderName+' 메시지 신고');report.onclick=()=>openReport({userId:message.sender_id,messageId:message.id,name:senderName});row.append(report);}
+    log.append(row);
   }
   if (bottom || (!history.loading && nearBottom)) log.scrollTop = log.scrollHeight;
   else {
@@ -106,7 +108,8 @@ function renderHeader() {
   $('#view-members').textContent = c ? `참여자 ${c.member_count}` : '참여자';
   renderMembers();
   avatar($('#header-avatar'), c?.kind === 'group' ? '♧' : c?.peer_name); avatar($('#profile-avatar'), c?.kind === 'group' ? '♧' : c?.peer_name);
-  $('#message-input').disabled = !c; $('#send').disabled = !c || sending;
+  $('#message-input').disabled = !c || c.send_restricted; $('#send').disabled = !c || sending || c.send_restricted;
+  if(c?.send_restricted) $('#contact-status').textContent='차단 관계 · 메시지 전송 제한';
 }
 function mergeHistory(id, data) {
   const previous = histories.get(id);
@@ -129,9 +132,9 @@ async function synchronize() {
   try {
     do {
       syncAgain = false;
-      const [result, saved] = await Promise.all([chatRequest('conversations'), chatRequest('friends')]);
+      const [result, saved, blocked] = await Promise.all([chatRequest('conversations'), chatRequest('friends'), chatRequest('blocks')]);
       if (epoch !== generation || !account) return;
-      conversations = result.conversations; friends = saved.friends;
+      conversations = result.conversations; friends = saved.friends; setBlockedUsers(blocked.blocks);
       renderSavedFriends(); updateFriendSaveButtons();
       if (!conversations.some(c => c.id === active)) { active = conversations[0]?.id || null; $('#message-input').value = ''; pendingSend = null; if (!active) $('.shell').classList.remove('chat-open'); }
       if (contextConversation && !conversations.some(c => c.id === contextConversation)) closeConversationMenu();
@@ -201,6 +204,7 @@ function clearAccount() {
   if ($('#new-dialog').open) $('#new-dialog').close();
   if ($('#members-dialog').open) $('#members-dialog').close();
   selectedMembers.clear(); groupCreating = false;
+  clearSafetyState();
   $('#direct-mode').disabled = false; $('#group-mode').disabled = false; $('#friend-mode').disabled = false;
   $('#member-list').replaceChildren(); $('#members-dialog-list').replaceChildren();
 }
@@ -266,6 +270,7 @@ function renderMembers() {
       const row = element('div', 'member-row');
       const face = element('span', 'member-face'); avatar(face, member.name);
       row.append(face, element('span', '', member.name + (member.id === account?.id ? ' (나)' : '')));
+      if(member.id!==account?.id){const actions=element('span','member-actions');const block=element('button','',isBlocked(member.id)?'차단 해제':'차단');block.type='button';block.setAttribute('aria-label',member.name+' '+block.textContent);block.onclick=()=>toggleBlock(member);const report=element('button','','신고');report.type='button';report.setAttribute('aria-label',member.name+' 사용자 신고');report.onclick=()=>openReport({userId:member.id,name:member.name});actions.append(block,report);row.append(actions);}
       target.append(row);
     }
   }
@@ -382,7 +387,9 @@ function renderFriends() {
         friends = friends.filter(f => f.id !== friend.id); renderList(); renderSavedFriends(); updateFriendSaveButtons(); synchronize();
       } catch (error) { if (epoch === generation) { listError(error.message); remove.disabled = false; } }
     };
-    actions.append(chat, remove); row.append(face, body, actions); list.append(row);
+    const block=element('button','remove-friend','⊘');block.setAttribute('aria-label',friend.name+' 차단');block.title='사용자 차단';block.onclick=()=>toggleBlock(friend);
+    const report=element('button','remove-friend','⚑');report.setAttribute('aria-label',friend.name+' 사용자 신고');report.title='사용자 신고';report.onclick=()=>openReport({userId:friend.id,name:friend.name});
+    actions.append(chat,block,report, remove); row.append(face, body, actions); list.append(row);
   }
   if (!list.childElementCount) list.append(element('p', 'empty', friends.length ? '검색 결과가 없어요.' : '저장한 친구가 없어요.\n＋ 버튼으로 친구를 추가해 보세요.'));
   $('.count').textContent = friends.length;

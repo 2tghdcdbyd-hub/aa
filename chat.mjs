@@ -1,4 +1,5 @@
 import { randomBytes } from 'node:crypto';
+import { createSafety } from './safety.mjs';
 
 // One process owns the live streams; SQLite owns durable conversation history.
 export function createChat(db, { json, body, userFor, sessionToken, hash }) {
@@ -67,6 +68,7 @@ export function createChat(db, { json, body, userFor, sessionToken, hash }) {
   }
   const streams = new Set();
   const rates = new Map();
+  const safety = createSafety(db,{json,body,userFor,notify});
   function notify(ids) {
     for (const stream of streams) {
       if (!ids.includes(stream.userId)) continue;
@@ -92,6 +94,7 @@ export function createChat(db, { json, body, userFor, sessionToken, hash }) {
   }
   async function route(req, res, url) {
     const path = url.pathname;
+    if(await safety.route(req,res,path)) return true;
     if (!['/api/users', '/api/conversations', '/api/events', '/api/friends', '/api/friends/remove'].includes(path) && !path.startsWith('/api/conversations/')) return false;
     const user = userFor(req);
     if (!user) { json(res, 401, { error: '로그인이 필요합니다.' }); return true; }
@@ -118,6 +121,7 @@ export function createChat(db, { json, body, userFor, sessionToken, hash }) {
         db.prepare('DELETE FROM friends WHERE owner_id=? AND friend_id=?').run(user.id, data.userId);
         notify([user.id]); json(res, 200, { ok: true }); return true;
       }
+      if(safety.blocked(user.id,data.userId)){json(res,403,{error:'차단 관계인 사용자는 친구로 추가할 수 없습니다.'});return true;}
       const added = db.prepare('INSERT OR IGNORE INTO friends VALUES(?,?,?)').run(user.id, data.userId, Date.now());
       const friend = db.prepare(`SELECT u.id,u.name,f.created_at FROM friends f JOIN users u ON u.id=f.friend_id WHERE f.owner_id=? AND f.friend_id=?`).get(user.id, data.userId);
       notify([user.id]); json(res, added.changes ? 201 : 200, { friend }); return true;
@@ -141,7 +145,9 @@ export function createChat(db, { json, body, userFor, sessionToken, hash }) {
           const participants = members(c.id), peer = participants.find(p => p.id !== user.id);
           return { ...c, peer_id: c.kind === 'direct' ? peer.id : null,
             peer_name: c.kind === 'group' ? c.title : peer.name,
-            member_count: participants.length, members: participants };
+            member_count: participants.length, members: participants,
+            blocked: c.kind==='direct' && safety.blocked(user.id,peer.id),
+            send_restricted: participants.some(p=>p.id!==user.id&&safety.blocked(user.id,p.id)) };
         });
       json(res, 200, { conversations }); return true;
     }
@@ -156,6 +162,7 @@ export function createChat(db, { json, body, userFor, sessionToken, hash }) {
         if (ids.length !== data.userIds.length + 1 || ids.some(id => !db.prepare('SELECT id FROM users WHERE id=?').get(id))) {
           json(res, 400, { error: '중복되지 않은 가입자를 선택해 주세요. 본인은 자동 포함됩니다.' }); return true;
         }
+        if(ids.some((a,i)=>ids.slice(i+1).some(b=>safety.blocked(a,b)))){json(res,403,{error:'차단 관계가 있는 사용자들을 같은 방에 초대할 수 없습니다.'});return true;}
         const id = randomBytes(16).toString('hex');
         db.exec('BEGIN IMMEDIATE;');
         try {
@@ -168,6 +175,7 @@ export function createChat(db, { json, body, userFor, sessionToken, hash }) {
       if ((data.kind !== undefined && data.kind !== 'direct') || typeof data.userId !== 'string' || data.userId === user.id || !db.prepare('SELECT id FROM users WHERE id=?').get(data.userId)) {
         json(res, 400, { error: '대화할 상대방을 선택해 주세요.' }); return true;
       }
+      if(safety.blocked(user.id,data.userId)){json(res,403,{error:'차단 관계인 사용자와 새 대화를 시작할 수 없습니다.'});return true;}
       const [a, b] = [user.id, data.userId].sort();
       let conversation = db.prepare("SELECT id FROM conversations WHERE kind='direct' AND user_a=? AND user_b=?").get(a, b);
       const created = !conversation;
@@ -210,6 +218,7 @@ export function createChat(db, { json, body, userFor, sessionToken, hash }) {
         const hasMore = rows.length > 50;
         json(res, 200, { messages: rows.slice(0, 50).reverse(), hasMore }); return true;
       }
+      if(members(conversation.id).some(p=>p.id!==user.id&&safety.blocked(user.id,p.id))){json(res,403,{error:'차단 관계인 참여자가 있어 이 방에 메시지를 보낼 수 없습니다.'});return true;}
       const data = await body(req);
       const text = typeof data.text === 'string' ? data.text.trim() : '';
       if (!text || text.length > 2000 || typeof data.clientId !== 'string' || !/^[a-zA-Z0-9-]{16,80}$/.test(data.clientId)) {
@@ -233,5 +242,6 @@ export function createChat(db, { json, body, userFor, sessionToken, hash }) {
     }
     json(res, 404, { error: '요청을 찾을 수 없습니다.' }); return true;
   }
-  return { route, revoke };
+  function revokeUser(userId){for(const stream of streams)if(stream.userId===userId){stream.res.write('event: expired\ndata: {}\n\n');stream.res.end();}}
+  return { route, revoke, revokeUser };
 }
