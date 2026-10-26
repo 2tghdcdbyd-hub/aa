@@ -63,6 +63,14 @@ test("terminal rendering, filters, pagination, short IDs and review safety", asy
     null,
     null,
   );
+  const targetId = "0123456789abcdef0123456789abcdef";
+  db.prepare("UPDATE users SET id=? WHERE id='bob'").run(targetId);
+  db.prepare("UPDATE reports SET reported_id=? WHERE reported_id='bob'").run(
+    targetId,
+  );
+  db.prepare("UPDATE reports SET reporter_id=? WHERE reporter_id='bob'").run(
+    targetId,
+  );
   db.close();
   function run(args, dbPath = path) {
     return spawnSync(process.execPath, ["moderation.mjs", ...args], {
@@ -77,6 +85,12 @@ test("terminal rendering, filters, pagination, short IDs and review safety", asy
     assert.match(list.stdout, /검토 대기 2건/);
     assert.match(list.stdout, /처리 완료 1건/);
     assert.match(list.stdout, /신고자/);
+    assert.match(list.stdout, /대상 ID/);
+    assert.ok(list.stdout.includes(targetId.slice(0, 12)));
+    assert.ok(list.stdout.includes(targetId.slice(12, 24)));
+    assert.ok(list.stdout.includes(targetId.slice(24)));
+    const wide = run(["list", "--width", "200"]);
+    assert.ok(wide.stdout.includes(targetId), "full ID shown in wide table");
     assert.match(list.stdout, /민준💙/);
     assert.match(list.stdout, /2026-10-26 09:00/);
     assert.match(list.stdout, /…/);
@@ -88,6 +102,10 @@ test("terminal rendering, filters, pagination, short IDs and review safety", asy
     assert.equal(narrow.status, 0);
     assert.ok(!narrow.stdout.includes("│"));
     assert.match(narrow.stdout, /→/);
+    assert.ok(
+      narrow.stdout.includes(targetId),
+      "narrow card retains full target ID",
+    );
     const filtered = run([
       "list",
       "--status",

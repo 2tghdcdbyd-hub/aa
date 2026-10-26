@@ -63,7 +63,7 @@ export function wrap(text, size) {
     return lines;
   });
 }
-export function table(headers, rows, sizes) {
+export function table(headers, rows, sizes, { wrapColumns = [] } = {}) {
   const line = (cells) =>
     cells
       .map((cell, i) => {
@@ -74,7 +74,17 @@ export function table(headers, rows, sizes) {
   return [
     line(headers),
     sizes.map((size) => "─".repeat(size)).join("─┼─"),
-    ...rows.map(line),
+    ...rows.flatMap((cells) => {
+      const columns = cells.map((cell, i) =>
+        wrapColumns.includes(i)
+          ? wrap(safeText(cell), sizes[i])
+          : [safeText(cell)],
+      );
+      return Array.from(
+        { length: Math.max(...columns.map((column) => column.length)) },
+        (_, row) => line(columns.map((column) => column[row] || "")),
+      );
+    }),
   ].join("\n");
 }
 export function section(title, value, columns) {

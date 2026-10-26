@@ -194,7 +194,8 @@ try {
             : "조건에 맞는 신고가 없습니다.",
         );
       else if (options.width >= 96) {
-        const preview = options.width - 85;
+        const targetIdWidth = Math.min(32, Math.max(12, options.width - 100));
+        const preview = options.width - 80 - targetIdWidth;
         console.log(
           table(
             [
@@ -203,6 +204,7 @@ try {
               "사유",
               "신고자",
               "대상",
+              "대상 ID",
               "접수 시각 (KST)",
               "설명",
             ],
@@ -212,10 +214,12 @@ try {
               reasons[r.reason] || r.reason,
               r.reporter_name,
               r.reported_name,
+              r.reported_id,
               date(r.created_at),
               r.details || "(설명 없음)",
             ]),
-            [8, 9, 10, 10, 10, 16, preview],
+            [8, 9, 10, 8, 8, targetIdWidth, 16, preview],
+            { wrapColumns: [5] },
           ),
         );
       } else {
@@ -237,6 +241,7 @@ try {
               options.width,
             ),
           );
+          console.log(section("대상 ID", row.reported_id, options.width));
           console.log(
             clip(
               "  설명: " + safeText(row.details || "(없음)"),
