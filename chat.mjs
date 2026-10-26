@@ -56,6 +56,12 @@ export function createChat(db, { json, body, userFor, sessionToken, hash }) {
     created_at INTEGER NOT NULL,
     PRIMARY KEY(owner_id,friend_id), CHECK(owner_id<>friend_id)
   );`);
+  db.exec(`CREATE TABLE IF NOT EXISTS conversation_preferences (
+    conversation_id TEXT NOT NULL, user_id TEXT NOT NULL,
+    pinned_at INTEGER, hidden INTEGER NOT NULL DEFAULT 0 CHECK(hidden IN (0,1)),
+    PRIMARY KEY(conversation_id,user_id),
+    FOREIGN KEY(conversation_id,user_id) REFERENCES conversation_members(conversation_id,user_id)
+  );`);
   function members(id) {
     return db.prepare('SELECT u.id,u.name FROM conversation_members m JOIN users u ON u.id=m.user_id WHERE m.conversation_id=? ORDER BY u.name,u.id').all(id);
   }
@@ -125,11 +131,13 @@ export function createChat(db, { json, body, userFor, sessionToken, hash }) {
       json(res, 200, { users }); return true;
     }
     if (path === '/api/conversations' && req.method === 'GET') {
-      const conversations = db.prepare(`SELECT c.id,c.created_at,c.kind,c.title,c.created_by,
+      const conversations = db.prepare(`SELECT c.id,c.created_at,c.kind,c.title,c.created_by,p.pinned_at,
         (SELECT text FROM messages WHERE conversation_id=c.id ORDER BY id DESC LIMIT 1) AS last_text,
         (SELECT created_at FROM messages WHERE conversation_id=c.id ORDER BY id DESC LIMIT 1) AS last_at
         FROM conversations c JOIN conversation_members m ON m.conversation_id=c.id
-        WHERE m.user_id=? ORDER BY COALESCE(last_at,c.created_at) DESC,c.id`).all(user.id).map(c => {
+        LEFT JOIN conversation_preferences p ON p.conversation_id=c.id AND p.user_id=m.user_id
+        WHERE m.user_id=? AND COALESCE(p.hidden,0)=0
+        ORDER BY (p.pinned_at IS NOT NULL) DESC,p.pinned_at DESC,COALESCE(last_at,c.created_at) DESC,c.id`).all(user.id).map(c => {
           const participants = members(c.id), peer = participants.find(p => p.id !== user.id);
           return { ...c, peer_id: c.kind === 'direct' ? peer.id : null,
             peer_name: c.kind === 'group' ? c.title : peer.name,
@@ -172,7 +180,24 @@ export function createChat(db, { json, body, userFor, sessionToken, hash }) {
           db.exec('COMMIT;'); conversation = { id };
         } catch (error) { db.exec('ROLLBACK;'); throw error; }
       }
+      db.prepare('UPDATE conversation_preferences SET hidden=0 WHERE conversation_id=? AND user_id=?').run(conversation.id, user.id);
       notify([a, b]); json(res, created ? 201 : 200, { conversation }); return true;
+    }
+    const preferenceMatch = path.match(/^\/api\/conversations\/([a-f0-9]{32})\/preferences$/);
+    if (preferenceMatch && req.method === 'POST') {
+      const conversation = member(preferenceMatch[1], user.id);
+      if (!conversation) { json(res, 404, { error: '대화를 찾을 수 없습니다.' }); return true; }
+      const data = await body(req);
+      const pin = typeof data.pinned === 'boolean', hide = typeof data.hidden === 'boolean';
+      if (pin === hide) { json(res, 400, { error: '고정 또는 삭제 설정 중 하나를 선택해 주세요.' }); return true; }
+      if (pin) {
+        db.prepare(`INSERT INTO conversation_preferences(conversation_id,user_id,pinned_at,hidden) VALUES(?,?,?,0)
+          ON CONFLICT(conversation_id,user_id) DO UPDATE SET pinned_at=excluded.pinned_at,hidden=0`).run(conversation.id,user.id,data.pinned ? Date.now() : null);
+      } else {
+        db.prepare(`INSERT INTO conversation_preferences(conversation_id,user_id,pinned_at,hidden) VALUES(?,?,NULL,?)
+          ON CONFLICT(conversation_id,user_id) DO UPDATE SET hidden=excluded.hidden,pinned_at=CASE WHEN excluded.hidden=1 THEN NULL ELSE conversation_preferences.pinned_at END`).run(conversation.id,user.id,data.hidden ? 1 : 0);
+      }
+      notify([user.id]); json(res, 200, { ok: true }); return true;
     }
     const match = path.match(/^\/api\/conversations\/([a-f0-9]{32})\/messages$/);
     if (match && ['GET', 'POST'].includes(req.method)) {
@@ -202,6 +227,7 @@ export function createChat(db, { json, body, userFor, sessionToken, hash }) {
       if (++rate.count > 120) { res.setHeader('Retry-After', '60'); json(res, 429, { error: '메시지를 너무 빠르게 보내고 있습니다. 잠시 후 다시 시도해 주세요.' }); return true; }
       const result = db.prepare('INSERT INTO messages(conversation_id,sender_id,client_id,text,created_at) VALUES(?,?,?,?,?)').run(conversation.id, user.id, data.clientId, text, Date.now());
       const message = db.prepare('SELECT id,sender_id,text,created_at FROM messages WHERE id=?').get(result.lastInsertRowid);
+      db.prepare('UPDATE conversation_preferences SET hidden=0 WHERE conversation_id=?').run(conversation.id);
       notify(members(conversation.id).map(member => member.id));
       json(res, 201, { message }); return true;
     }

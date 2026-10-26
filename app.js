@@ -2,6 +2,8 @@ const $ = selector => document.querySelector(selector);
 let account = null, conversations = [], friends = [], active = null, source = null;
 let listTab = 'chats';
 const friendOperations = new Set();
+let contextConversation = null, menuAnchor = null, deleteTarget = null;
+const conversationOperations = new Set();
 let generation = 0, syncRunning = false, syncAgain = false, sending = false;
 let selectionVersion = 0, searchVersion = 0, pendingSend = null;
 const histories = new Map();
@@ -36,14 +38,22 @@ function renderList() {
   const list = $('#contacts'); list.replaceChildren();
   const query = $('#search').value.toLowerCase();
   for (const c of conversations.filter(c => c.peer_name.toLowerCase().includes(query))) {
+    const row = element('div', 'conversation-row'); row.dataset.conversationId = c.id;
     const button = element('button', 'contact' + (c.id === active ? ' active' : ''));
+    button.dataset.conversationId = c.id;
     button.setAttribute('aria-pressed', String(c.id === active));
     const face = element('span', 'avatar'); avatar(face, c.kind === 'group' ? '♧' : c.peer_name);
     const body = element('div', 'contact-body'), top = element('div', 'contact-top');
     top.append(element('strong', '', c.peer_name + (c.kind === 'group' ? ` · ${c.member_count}` : '')), element('time', '', clock(c.last_at || c.created_at)));
+    if (c.pinned_at !== null) { const pin = element('span', 'pinned-badge', '고정'); pin.setAttribute('aria-label', '상단 고정됨'); top.append(pin); }
     body.append(top, element('p', '', c.last_text || '첫 인사를 건네보세요 👋'));
     button.append(face, body); button.onclick = () => selectConversation(c.id);
-    list.append(button);
+    const menu = element('button', 'conversation-options', '⋯'); menu.type = 'button';
+    menu.setAttribute('aria-label', c.peer_name + ' 대화 메뉴'); menu.setAttribute('aria-haspopup', 'menu');
+    menu.onclick = () => { const box = menu.getBoundingClientRect(); openConversationMenu(c.id, box.right, box.bottom, menu); };
+    row.oncontextmenu = event => { event.preventDefault(); openConversationMenu(c.id, event.clientX, event.clientY, button); };
+    button.onkeydown = event => { if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) { event.preventDefault(); const box = button.getBoundingClientRect(); openConversationMenu(c.id, box.left + 30, box.bottom, button); } };
+    row.append(button, menu); list.append(row);
   }
   if (!list.childElementCount) list.append(element('p', 'empty', conversations.length ? '검색 결과가 없어요.' : '아직 대화가 없어요.\n＋ 버튼으로 친구를 찾아보세요.'));
   $('.count').textContent = conversations.length;
@@ -92,7 +102,7 @@ function renderHeader() {
   $('#profile-handle').textContent = c ? (c.kind === 'group' ? `단체 대화 · ${c.member_count}명` : '1:1 대화') : '가까워지는 대화';
   $('#profile-about').textContent = c ? (c.kind === 'group' ? '함께 나누는 이야기, 더 가까워지는 우리. 참여자만 대화 기록에 접근할 수 있어요.' : '두 사람만 참여하는 대화입니다. 기록은 서버에 저장되어 다시 로그인해도 이어집니다.') : '가입한 친구를 검색하고 대화를 시작하세요.';
   $('#contact-status').textContent = c ? (c.kind === 'group' ? `단체 채팅 · ${c.member_count}명` : '1:1 채팅') : '친구를 찾아보세요';
-  $('#view-members').hidden = !c;
+  $('#view-members').hidden = !c; $('#chat-options').hidden = !c;
   $('#view-members').textContent = c ? `참여자 ${c.member_count}` : '참여자';
   renderMembers();
   avatar($('#header-avatar'), c?.kind === 'group' ? '♧' : c?.peer_name); avatar($('#profile-avatar'), c?.kind === 'group' ? '♧' : c?.peer_name);
@@ -123,7 +133,8 @@ async function synchronize() {
       if (epoch !== generation || !account) return;
       conversations = result.conversations; friends = saved.friends;
       renderSavedFriends(); updateFriendSaveButtons();
-      if (!conversations.some(c => c.id === active)) active = conversations[0]?.id || null;
+      if (!conversations.some(c => c.id === active)) { active = conversations[0]?.id || null; $('#message-input').value = ''; pendingSend = null; if (!active) $('.shell').classList.remove('chat-open'); }
+      if (contextConversation && !conversations.some(c => c.id === contextConversation)) closeConversationMenu();
       renderList(); renderHeader();
       if (active) await refreshConversation(active, epoch);
       else renderMessages();
@@ -176,6 +187,9 @@ function loadAccount(user) {
 }
 function clearAccount() {
   generation++; selectionVersion++; searchVersion++; source?.close(); source = null;
+  closeConversationMenu(); deleteTarget = null; conversationOperations.clear();
+  if ($('#delete-conversation-dialog').open) $('#delete-conversation-dialog').close();
+  $('#confirm-delete-conversation').disabled = false; $('#cancel-delete-conversation').disabled = false;
   account = null; conversations = []; friends = []; active = null; histories.clear();
   friendOperations.clear(); listError(); setListTab('chats');
   $('#saved-friends-picker').replaceChildren();
@@ -337,7 +351,7 @@ function setListTab(tab) {
   $('#search').setAttribute('aria-label', $('#search').placeholder);
   $('#list-heading').textContent = tab === 'friends' ? '친구' : '메시지';
   $('#list-label').textContent = tab === 'friends' ? '저장한 친구' : '모든 대화';
-  $('#list-order').textContent = tab === 'friends' ? '이름 순' : '최근 순';
+  $('#list-order').textContent = tab === 'friends' ? '이름 순' : '고정 우선 · 최근 순';
   $('.new-chat').setAttribute('aria-label', tab === 'friends' ? '친구 추가' : '새 대화');
   $('.new-chat').title = tab === 'friends' ? '친구 추가' : '새 대화';
   for (const button of document.querySelectorAll('[data-tab]')) {
@@ -423,3 +437,67 @@ async function saveFriend(user) {
   } catch (error) { if (epoch === generation) $('#friend-error').textContent = error.message; }
   finally { if (epoch === generation) { friendOperations.delete(user.id); updateFriendSaveButtons(); } }
 }
+
+function closeConversationMenu({ focus = false } = {}) {
+  $('#conversation-menu').hidden = true;
+  $('#chat-options').setAttribute('aria-expanded', 'false');
+  if (menuAnchor) menuAnchor.setAttribute('aria-expanded', 'false');
+  if (focus && menuAnchor?.isConnected) menuAnchor.focus();
+  contextConversation = null; menuAnchor = null;
+}
+function openConversationMenu(id, x, y, anchor) {
+  const conversation = conversations.find(c => c.id === id);
+  if (!conversation || !account) return;
+  closeConversationMenu(); contextConversation = id; menuAnchor = anchor;
+  anchor?.setAttribute('aria-expanded', 'true');
+  $('#conversation-menu-title').textContent = conversation.peer_name;
+  $('#pin-conversation').textContent = conversation.pinned_at !== null ? '고정 해제' : '위로 고정';
+  const menu = $('#conversation-menu'); menu.hidden = false;
+  menu.style.left = Math.max(8, Math.min(x, innerWidth - menu.offsetWidth - 8)) + 'px';
+  menu.style.top = Math.max(8, Math.min(y, innerHeight - menu.offsetHeight - 8)) + 'px';
+  $('#pin-conversation').focus();
+}
+$('#chat-options').onclick = () => { const box = $('#chat-options').getBoundingClientRect(); openConversationMenu(active, box.right, box.bottom, $('#chat-options')); };
+$('.chat-header').addEventListener('contextmenu', event => { if (!active) return; event.preventDefault(); openConversationMenu(active, event.clientX, event.clientY, $('#chat-options')); });
+document.addEventListener('pointerdown', event => { if (!$('#conversation-menu').hidden && !$('#conversation-menu').contains(event.target)) closeConversationMenu(); });
+document.addEventListener('keydown', event => {
+  if ($('#conversation-menu').hidden) return;
+  if (event.key === 'Escape' || event.key === 'Tab') { if (event.key === 'Escape') event.preventDefault(); closeConversationMenu({ focus: event.key === 'Escape' }); }
+  if (['ArrowDown','ArrowUp','Home','End'].includes(event.key)) {
+    event.preventDefault(); const items = [$('#pin-conversation'), $('#delete-conversation')];
+    const index = event.key === 'Home' ? 0 : event.key === 'End' ? 1 : (items.indexOf(document.activeElement) + 1) % 2;
+    items[index].focus();
+  }
+});
+window.addEventListener('resize', () => closeConversationMenu());
+document.addEventListener('scroll', event => { if (!$('#conversation-menu').contains(event.target)) closeConversationMenu(); }, true);
+$('#pin-conversation').onclick = async () => {
+  const id = contextConversation, c = conversations.find(c => c.id === id), epoch = generation;
+  closeConversationMenu({ focus: true });
+  if (!c || conversationOperations.has(id)) return;
+  conversationOperations.add(id); listError();
+  try { await chatRequest(`conversations/${id}/preferences`, { pinned: c.pinned_at === null }); if (epoch === generation) await synchronize(); }
+  catch (error) { if (epoch === generation) { listError(error.message); chatError(error.message); } }
+  finally { if (epoch === generation) conversationOperations.delete(id); }
+};
+$('#delete-conversation').onclick = () => {
+  const id = contextConversation, c = conversations.find(c => c.id === id);
+  closeConversationMenu(); if (!c || conversationOperations.has(id)) return;
+  deleteTarget = id; $('#delete-conversation-name').textContent = c.peer_name;
+  $('#delete-conversation-error').textContent = '';
+  $('#delete-conversation-dialog').showModal(); $('#cancel-delete-conversation').focus();
+};
+$('#cancel-delete-conversation').onclick = () => $('#delete-conversation-dialog').close();
+$('#delete-conversation-dialog').addEventListener('cancel', event => { if ($('#confirm-delete-conversation').disabled) event.preventDefault(); });
+$('#delete-conversation-dialog').addEventListener('close', () => { deleteTarget = null; });
+$('#confirm-delete-conversation').onclick = async () => {
+  const id = deleteTarget, epoch = generation;
+  if (!id || conversationOperations.has(id)) return;
+  conversationOperations.add(id); $('#confirm-delete-conversation').disabled = true; $('#cancel-delete-conversation').disabled = true;
+  try {
+    await chatRequest(`conversations/${id}/preferences`, { hidden: true });
+    if (epoch !== generation) return;
+    histories.delete(id); await synchronize(); $('#delete-conversation-dialog').close();
+  } catch (error) { if (epoch === generation) $('#delete-conversation-error').textContent = error.message; }
+  finally { if (epoch === generation) { conversationOperations.delete(id); $('#confirm-delete-conversation').disabled = false; $('#cancel-delete-conversation').disabled = false; } }
+};

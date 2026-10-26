@@ -8,7 +8,7 @@ import { once } from 'node:events';
 import { randomUUID, createHash } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 
-test('chat, personal friends, realtime sync, persistence and legacy migration', { timeout: 30000 }, async () => {
+test('chat, friends, personal pin/delete settings, realtime sync and persistence', { timeout: 30000 }, async () => {
   const dir = await mkdtemp(join(tmpdir(), 'pingo-chat-'));
   const port = 45000 + Math.floor(Math.random() * 10000), base = `http://127.0.0.1:${port}`;
   let child; const controllers = [];
@@ -143,6 +143,34 @@ test('chat, personal friends, realtime sync, persistence and legacy migration', 
     assert.equal((await request('friends',alice.cookie).then(r=>r.json())).friends.length,0);
     assert.equal((await request(path,alice.cookie).then(r=>r.json())).messages.at(-1).text,'message-53','friend removal preserves existing chat');
     assert.equal((await request(groupPath,alice.cookie).then(r=>r.json())).messages.length,3);
+    const prefs=`conversations/${id}/preferences`, groupPrefs=`conversations/${groupId}/preferences`;
+    assert.equal((await request(prefs,null,{pinned:true})).status,401);
+    assert.equal((await request(groupPrefs,outsider.cookie,{hidden:true})).status,404);
+    assert.equal((await request(groupPrefs,outsider.cookie,{pinned:true})).status,404);
+    assert.equal((await request(prefs,alice.cookie,{pinned:'yes'})).status,400);
+    assert.equal((await request(prefs,alice.cookie,{pinned:true,hidden:true})).status,400);
+    assert.equal((await request(groupPrefs,alice.cookie,{pinned:true,user_id:bob.user.id})).status,200);
+    let personalRooms=(await request('conversations',alice.cookie).then(r=>r.json())).conversations;
+    assert.equal(personalRooms[0].id,groupId); assert.ok(personalRooms[0].pinned_at);
+    assert.equal((await request('conversations',bob.cookie).then(r=>r.json())).conversations.find(c=>c.id===groupId).pinned_at,null);
+    await request(path,bob.cookie,{text:'newer direct message',clientId:randomUUID()});
+    assert.equal((await request('conversations',alice.cookie).then(r=>r.json())).conversations[0].id,groupId,'pin beats more recent messages');
+    await request(groupPrefs,alice.cookie,{pinned:false});
+    assert.equal((await request('conversations',alice.cookie).then(r=>r.json())).conversations[0].id,id);
+    await request(prefs,alice.cookie,{pinned:true}); await request(groupPrefs,alice.cookie,{hidden:true});
+    assert.equal((await request('conversations',alice.cookie).then(r=>r.json())).conversations.some(c=>c.id===groupId),false);
+    assert.equal((await request('conversations',bob.cookie).then(r=>r.json())).conversations.some(c=>c.id===groupId),true);
+    assert.equal((await request(groupPath,bob.cookie).then(r=>r.json())).messages.length,3,'deleting does not destroy messages');
+    controllers.forEach(c=>c.abort()); await stop(); await start();
+    personalRooms=(await request('conversations',alice.cookie).then(r=>r.json())).conversations;
+    assert.equal(personalRooms.some(c=>c.id===groupId),false); assert.ok(personalRooms.find(c=>c.id===id).pinned_at,'pin survives restart');
+    await request(groupPath,eve.cookie,{text:'group appears again',clientId:randomUUID()});
+    const reappeared=(await request('conversations',alice.cookie).then(r=>r.json())).conversations.find(c=>c.id===groupId);
+    assert.ok(reappeared); assert.equal(reappeared.pinned_at,null,'deleting clears the pin');
+    await request(prefs,alice.cookie,{hidden:true});
+    assert.equal((await request('conversations',alice.cookie).then(r=>r.json())).conversations.some(c=>c.id===id),false);
+    await request('conversations',alice.cookie,{userId:bob.user.id});
+    assert.equal((await request('conversations',alice.cookie).then(r=>r.json())).conversations.some(c=>c.id===id),true,'starting direct chat restores hidden room');
     const integrity=new DatabaseSync(join(dir,'chat.sqlite')); assert.equal(integrity.prepare('PRAGMA foreign_key_check').all().length,0); integrity.close();
   } finally { controllers.forEach(c => c.abort()); if (child && child.exitCode === null) await stop(); await rm(dir, { recursive: true, force: true }); }
 });
