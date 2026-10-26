@@ -1,4 +1,5 @@
 import http from 'node:http';
+import { createChat } from './chat.mjs';
 import { readFile, mkdir } from 'node:fs/promises';
 import { DatabaseSync } from 'node:sqlite';
 import { randomBytes, scrypt as scryptCallback, timingSafeEqual, createHash } from 'node:crypto';
@@ -27,7 +28,7 @@ function setSession(req, res, user) {
 function json(res, status, data) { res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(data)); }
 async function body(req) {
   let text = ''; let size = 0;
-  for await (const part of req) { size += part.length; if (size > 8192) throw Object.assign(new Error('요청이 너무 큽니다.'), { status: 413 }); text += part; }
+  for await (const part of req) { size += part.length; if (size > 16384) throw Object.assign(new Error('요청이 너무 큽니다.'), { status: 413 }); text += part; }
   try { const result = JSON.parse(text); if (!result || typeof result !== 'object' || Array.isArray(result)) throw Error(); return result; }
   catch { throw Object.assign(new Error('올바른 JSON 요청이 필요합니다.'), { status: 400 }); }
 }
@@ -39,13 +40,15 @@ function limited(req) {
   if (!entry || entry.until <= Date.now()) { entry = { count: 0, until: Date.now() + 15 * 60_000 }; attempts.set(key, entry); }
   return ++entry.count > 30;
 }
+const chat = createChat(db, { json, body, userFor, sessionToken, hash });
 const files = { '/': ['index.html', 'text/html'], '/app.js': ['app.js', 'text/javascript'], '/auth.js': ['auth.js', 'text/javascript'], '/style.css': ['style.css', 'text/css'] };
 const server = http.createServer(async (req, res) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Referrer-Policy', 'same-origin');
   res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
   try {
-    const path = new URL(req.url, 'http://localhost').pathname;
+    const url = new URL(req.url, 'http://localhost');
+    const path = url.pathname;
     if (path.startsWith('/api/')) {
       if (req.method === 'POST') {
         // Require JSON and reject cross-origin requests; cookies never authorize cross-site writes.
@@ -54,9 +57,11 @@ const server = http.createServer(async (req, res) => {
         if (!sameOrigin || req.headers['sec-fetch-site'] === 'cross-site') return json(res, 403, { error: '다른 사이트의 요청은 허용되지 않습니다.' });
         if (req.headers['content-type']?.split(';')[0].trim() !== 'application/json') return json(res, 415, { error: 'JSON 요청이 필요합니다.' });
       }
+      if (await chat.route(req, res, url)) return;
       if (path === '/api/me' && req.method === 'GET') { const user = userFor(req); return json(res, user ? 200 : 401, user ? { user: publicUser(user) } : { error: '로그인이 필요합니다.' }); }
       if (path === '/api/logout' && req.method === 'POST') {
         db.prepare('DELETE FROM sessions WHERE token_hash=?').run(hash(sessionToken(req)));
+        chat.revoke(sessionToken(req));
         res.setHeader('Set-Cookie', `${cookieName}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0${secure ? '; Secure' : ''}`);
         return json(res, 200, { ok: true });
       }

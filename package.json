@@ -5,8 +5,8 @@
   "scripts": {
     "start": "node server.mjs",
     "dev": "node server.mjs",
-    "check": "node --check app.js && node --check auth.js && node --check server.mjs",
-    "test": "node --test test/auth.test.mjs"
+    "check": "node --check app.js && node --check auth.js && node --check server.mjs && node --check chat.mjs",
+    "test": "node --test test/*.test.mjs"
   },
   "engines": {
     "node": ">=24"
