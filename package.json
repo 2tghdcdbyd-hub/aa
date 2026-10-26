@@ -5,9 +5,10 @@
   "scripts": {
     "start": "node server.mjs",
     "dev": "node server.mjs",
-    "check": "node --check app.js && node --check auth.js && node --check server.mjs && node --check chat.mjs && node --check safety.js && node --check safety.mjs && node --check recovery.mjs && node --check moderation.mjs && node --check moderation-format.mjs",
+    "check": "node --check app.js && node --check auth.js && node --check server.mjs && node --check chat.mjs && node --check safety.js && node --check safety.mjs && node --check recovery.mjs && node --check moderation.mjs && node --check moderation-format.mjs && node --check file-store.mjs && node --check attachment-repository.mjs && node --check attachments.mjs && node --check attachments-client.js && node --check tools/export-data.mjs",
     "test": "node --test test/*.test.mjs",
-    "moderate": "node moderation.mjs"
+    "moderate": "node moderation.mjs",
+    "export-data": "node tools/export-data.mjs"
   },
   "engines": {
     "node": ">=24"

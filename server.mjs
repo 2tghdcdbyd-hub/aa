@@ -1,6 +1,7 @@
 import http from 'node:http';
 import { createChat } from './chat.mjs';
 import { createRecovery } from './recovery.mjs';
+import { createLocalFileStore } from './file-store.mjs';
 import { readFile, mkdir } from 'node:fs/promises';
 import { DatabaseSync } from 'node:sqlite';
 import { randomBytes, scrypt as scryptCallback, timingSafeEqual, createHash } from 'node:crypto';
@@ -41,9 +42,10 @@ function limited(req) {
   if (!entry || entry.until <= Date.now()) { entry = { count: 0, until: Date.now() + 15 * 60_000 }; attempts.set(key, entry); }
   return ++entry.count > 30;
 }
-const chat = createChat(db, { json, body, userFor, sessionToken, hash });
+const storage = createLocalFileStore(process.env.PINGO_UPLOAD_DIR || new URL('./.data/uploads',import.meta.url).pathname);
+const chat = createChat(db, { json, body, userFor, sessionToken, hash, storage });
 const recovery = createRecovery(db,{json,body,userFor,scrypt,hash,limited,revokeUser:chat.revokeUser});
-const files = { '/': ['index.html', 'text/html'], '/app.js': ['app.js', 'text/javascript'], '/auth.js': ['auth.js', 'text/javascript'], '/safety.js': ['safety.js','text/javascript'], '/style.css': ['style.css', 'text/css'] };
+const files = { '/': ['index.html', 'text/html'], '/app.js': ['app.js', 'text/javascript'], '/auth.js': ['auth.js', 'text/javascript'], '/safety.js': ['safety.js','text/javascript'], '/attachments-client.js':['attachments-client.js','text/javascript'], '/style.css': ['style.css', 'text/css'] };
 const server = http.createServer(async (req, res) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Referrer-Policy', 'same-origin');
@@ -57,7 +59,8 @@ const server = http.createServer(async (req, res) => {
         let sameOrigin = true;
         if (req.headers.origin) { try { sameOrigin = new URL(req.headers.origin).host === req.headers.host; } catch { sameOrigin = false; } }
         if (!sameOrigin || req.headers['sec-fetch-site'] === 'cross-site') return json(res, 403, { error: '다른 사이트의 요청은 허용되지 않습니다.' });
-        if (req.headers['content-type']?.split(';')[0].trim() !== 'application/json') return json(res, 415, { error: 'JSON 요청이 필요합니다.' });
+        const uploadRoute = /^\/api\/conversations\/[a-f0-9]{32}\/files$/.test(path);
+        if (req.headers['content-type']?.split(';')[0].trim() !== (uploadRoute ? 'application/octet-stream' : 'application/json')) return json(res, 415, { error: uploadRoute ? '파일은 바이너리 전송 형식으로 보내 주세요.' : 'JSON 요청이 필요합니다.' });
       }
       if (await recovery.route(req,res,path)) return;
       if (await chat.route(req, res, url)) return;
@@ -96,6 +99,6 @@ const server = http.createServer(async (req, res) => {
     const file = files[path]; if (!file) { res.writeHead(404); return res.end('Not found'); }
     const content = await readFile(new URL(file[0], import.meta.url));
     res.writeHead(200, { 'Content-Type': file[1] + '; charset=utf-8', 'Cache-Control': 'no-cache' }); res.end(req.method === 'HEAD' ? undefined : content);
-  } catch (error) { json(res, error.status || 500, { error: error.status ? error.message : '서버 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.' }); }
+  } catch (error) { if(res.headersSent||res.destroyed){res.destroy();return;} req.resume(); json(res, error.status || 500, { error: error.status ? error.message : '서버 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.' }); }
 });
 server.listen(Number(process.env.PORT) || 3000, '0.0.0.0', () => console.log('Pingo running on port ' + (process.env.PORT || 3000)));

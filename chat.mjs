@@ -1,8 +1,10 @@
 import { randomBytes } from 'node:crypto';
 import { createSafety } from './safety.mjs';
+import { createAttachments } from './attachments.mjs';
+import { createAttachmentRepository } from './attachment-repository.mjs';
 
 // One process owns the live streams; SQLite owns durable conversation history.
-export function createChat(db, { json, body, userFor, sessionToken, hash }) {
+export function createChat(db, { json, body, userFor, sessionToken, hash, storage }) {
   db.exec(`
     CREATE TABLE IF NOT EXISTS conversations (
       id TEXT PRIMARY KEY,
@@ -66,6 +68,8 @@ export function createChat(db, { json, body, userFor, sessionToken, hash }) {
   function members(id) {
     return db.prepare('SELECT u.id,u.name FROM conversation_members m JOIN users u ON u.id=m.user_id WHERE m.conversation_id=? ORDER BY u.name,u.id').all(id);
   }
+  const attachmentRepository = createAttachmentRepository(db);
+  const attachments = createAttachments({repository:attachmentRepository,storage,userFor,json,member,members,blocked:(a,b)=>safety.blocked(a,b),notify});
   const streams = new Set();
   const rates = new Map();
   const safety = createSafety(db,{json,body,userFor,notify});
@@ -94,6 +98,7 @@ export function createChat(db, { json, body, userFor, sessionToken, hash }) {
   }
   async function route(req, res, url) {
     const path = url.pathname;
+    if(await attachments.route(req,res,path)) return true;
     if(await safety.route(req,res,path)) return true;
     if (!['/api/users', '/api/conversations', '/api/events', '/api/friends', '/api/friends/remove'].includes(path) && !path.startsWith('/api/conversations/')) return false;
     const user = userFor(req);
@@ -216,7 +221,7 @@ export function createChat(db, { json, body, userFor, sessionToken, hash }) {
         if (before !== null && (!/^\d+$/.test(before) || !Number.isSafeInteger(Number(before)))) { json(res, 400, { error: '올바른 메시지 위치가 필요합니다.' }); return true; }
         const rows = db.prepare('SELECT id,sender_id,text,created_at FROM messages WHERE conversation_id=? AND id<? ORDER BY id DESC LIMIT 51').all(conversation.id, before === null ? Number.MAX_SAFE_INTEGER : Number(before));
         const hasMore = rows.length > 50;
-        json(res, 200, { messages: rows.slice(0, 50).reverse(), hasMore }); return true;
+        json(res, 200, { messages: await attachmentRepository.decorateMany(rows.slice(0, 50).reverse()), hasMore }); return true;
       }
       if(members(conversation.id).some(p=>p.id!==user.id&&safety.blocked(user.id,p.id))){json(res,403,{error:'차단 관계인 참여자가 있어 이 방에 메시지를 보낼 수 없습니다.'});return true;}
       const data = await body(req);
@@ -228,7 +233,7 @@ export function createChat(db, { json, body, userFor, sessionToken, hash }) {
       const existing = db.prepare('SELECT * FROM messages WHERE sender_id=? AND client_id=?').get(user.id, data.clientId);
       if (existing) {
         if (existing.conversation_id !== conversation.id || existing.text !== text) json(res, 409, { error: '전송 ID가 다른 메시지에 사용되었습니다.' });
-        else { const { client_id, conversation_id, ...message } = existing; json(res, 200, { message }); }
+        else { const { client_id, conversation_id, ...message } = existing; json(res, 200, { message: await attachmentRepository.decorateMessage(message) }); }
         return true;
       }
       let rate = rates.get(user.id);

@@ -84,7 +84,8 @@ function renderMessages({ bottom = false } = {}) {
     if (!own) { const face = element('span', 'avatar'); avatar(face, senderName); row.append(face); }
     const content = element('div', 'message-content');
     if (!own) content.append(element('div', 'sender', senderName));
-    content.append(element('div', 'bubble', message.text), element('time', '', clock(message.created_at)));
+    if(message.attachment){const file=message.attachment,card=element('div','bubble file-card');card.append(element('strong','file-name',file.name),element('span','file-size',fileSize(file.size)));const link=element('a','file-download','다운로드 ↓');link.href='/api/files/'+encodeURIComponent(file.id);link.download=file.name;link.onclick=event=>downloadAttachment(event,file);card.append(link);content.append(card,element('time','',clock(message.created_at)));}
+    else content.append(element('div', 'bubble', message.text), element('time', '', clock(message.created_at)));
     row.dataset.messageId = message.id; row.append(content);
     if(!own){const report=element('button','message-report','⚑');report.type='button';report.setAttribute('aria-label', senderName+' 메시지 신고');report.onclick=()=>openReport({userId:message.sender_id,messageId:message.id,name:senderName});row.append(report);}
     log.append(row);
@@ -110,6 +111,7 @@ function renderHeader() {
   avatar($('#header-avatar'), c?.kind === 'group' ? '♧' : c?.peer_name); avatar($('#profile-avatar'), c?.kind === 'group' ? '♧' : c?.peer_name);
   $('#message-input').disabled = !c || c.send_restricted; $('#send').disabled = !c || sending || c.send_restricted;
   if(c?.send_restricted) $('#contact-status').textContent='차단 관계 · 메시지 전송 제한';
+  updateAttachmentControls();
 }
 function mergeHistory(id, data) {
   const previous = histories.get(id);
@@ -136,7 +138,7 @@ async function synchronize() {
       if (epoch !== generation || !account) return;
       conversations = result.conversations; friends = saved.friends; setBlockedUsers(blocked.blocks);
       renderSavedFriends(); updateFriendSaveButtons();
-      if (!conversations.some(c => c.id === active)) { active = conversations[0]?.id || null; $('#message-input').value = ''; pendingSend = null; if (!active) $('.shell').classList.remove('chat-open'); }
+      if (!conversations.some(c => c.id === active)) { clearAttachment(); active = conversations[0]?.id || null; $('#message-input').value = ''; pendingSend = null; if (!active) $('.shell').classList.remove('chat-open'); }
       if (contextConversation && !conversations.some(c => c.id === contextConversation)) closeConversationMenu();
       renderList(); renderHeader();
       if (active) await refreshConversation(active, epoch);
@@ -150,7 +152,7 @@ async function synchronize() {
 }
 async function selectConversation(id) {
   const version = ++selectionVersion, epoch = generation;
-  if (active !== id) { $('#message-input').value = ''; pendingSend = null; }
+  if (active !== id) { $('#message-input').value = ''; pendingSend = null; clearAttachment(); }
   active = id; setListTab('chats'); renderList(); renderHeader(); renderMessages({ bottom: true });
   $('.shell').classList.add('chat-open');
   try { await refreshConversation(id, epoch, { bottom: true }); if (version === selectionVersion) chatError(); }
@@ -189,7 +191,7 @@ function loadAccount(user) {
   connectEvents(); synchronize();
 }
 function clearAccount() {
-  generation++; selectionVersion++; searchVersion++; source?.close(); source = null;
+  generation++; clearAttachment(); selectionVersion++; searchVersion++; source?.close(); source = null;
   closeConversationMenu(); deleteTarget = null; conversationOperations.clear();
   if ($('#delete-conversation-dialog').open) $('#delete-conversation-dialog').close();
   $('#confirm-delete-conversation').disabled = false; $('#cancel-delete-conversation').disabled = false;
