@@ -50,6 +50,12 @@ export function createChat(db, { json, body, userFor, sessionToken, hash }) {
   CREATE INDEX IF NOT EXISTS conversation_members_user ON conversation_members(user_id,conversation_id);
   INSERT OR IGNORE INTO conversation_members SELECT id,user_a FROM conversations WHERE kind='direct';
   INSERT OR IGNORE INTO conversation_members SELECT id,user_b FROM conversations WHERE kind='direct';`);
+  db.exec(`CREATE TABLE IF NOT EXISTS friends (
+    owner_id TEXT NOT NULL REFERENCES users(id),
+    friend_id TEXT NOT NULL REFERENCES users(id),
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY(owner_id,friend_id), CHECK(owner_id<>friend_id)
+  );`);
   function members(id) {
     return db.prepare('SELECT u.id,u.name FROM conversation_members m JOIN users u ON u.id=m.user_id WHERE m.conversation_id=? ORDER BY u.name,u.id').all(id);
   }
@@ -80,7 +86,7 @@ export function createChat(db, { json, body, userFor, sessionToken, hash }) {
   }
   async function route(req, res, url) {
     const path = url.pathname;
-    if (!['/api/users', '/api/conversations', '/api/events'].includes(path) && !path.startsWith('/api/conversations/')) return false;
+    if (!['/api/users', '/api/conversations', '/api/events', '/api/friends', '/api/friends/remove'].includes(path) && !path.startsWith('/api/conversations/')) return false;
     const user = userFor(req);
     if (!user) { json(res, 401, { error: '로그인이 필요합니다.' }); return true; }
     if (path === '/api/events' && req.method === 'GET') {
@@ -91,6 +97,24 @@ export function createChat(db, { json, body, userFor, sessionToken, hash }) {
       res.on('close', () => streams.delete(stream));
       res.write('retry: 2000\nevent: sync\ndata: {}\n\n');
       return true;
+    }
+    if (path === '/api/friends' && req.method === 'GET') {
+      const friends = db.prepare(`SELECT u.id,u.name,f.created_at FROM friends f
+        JOIN users u ON u.id=f.friend_id WHERE f.owner_id=? ORDER BY u.name,u.id`).all(user.id);
+      json(res, 200, { friends }); return true;
+    }
+    if ((path === '/api/friends' || path === '/api/friends/remove') && req.method === 'POST') {
+      const data = await body(req);
+      if (typeof data.userId !== 'string' || data.userId === user.id || !db.prepare('SELECT id FROM users WHERE id=?').get(data.userId)) {
+        json(res, 400, { error: '친구로 저장할 가입자를 선택해 주세요.' }); return true;
+      }
+      if (path === '/api/friends/remove') {
+        db.prepare('DELETE FROM friends WHERE owner_id=? AND friend_id=?').run(user.id, data.userId);
+        notify([user.id]); json(res, 200, { ok: true }); return true;
+      }
+      const added = db.prepare('INSERT OR IGNORE INTO friends VALUES(?,?,?)').run(user.id, data.userId, Date.now());
+      const friend = db.prepare(`SELECT u.id,u.name,f.created_at FROM friends f JOIN users u ON u.id=f.friend_id WHERE f.owner_id=? AND f.friend_id=?`).get(user.id, data.userId);
+      notify([user.id]); json(res, added.changes ? 201 : 200, { friend }); return true;
     }
     if (path === '/api/users' && req.method === 'GET') {
       const query = (url.searchParams.get('q') || '').trim();

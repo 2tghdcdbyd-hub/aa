@@ -8,7 +8,7 @@ import { once } from 'node:events';
 import { randomUUID, createHash } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 
-test('direct and group live chat, membership, history and legacy migration', { timeout: 30000 }, async () => {
+test('chat, personal friends, realtime sync, persistence and legacy migration', { timeout: 30000 }, async () => {
   const dir = await mkdtemp(join(tmpdir(), 'pingo-chat-'));
   const port = 45000 + Math.floor(Math.random() * 10000), base = `http://127.0.0.1:${port}`;
   let child; const controllers = [];
@@ -116,6 +116,33 @@ test('direct and group live chat, membership, history and legacy migration', { t
     assert.equal((await request(groupPath,eve.cookie).then(r=>r.json())).messages.length,3);
     assert.equal((await request(oldPath,'pingo_session=legacy-token').then(r=>r.json())).messages[0].text,'보존할 기존 대화');
     assert.equal((await request(path,alice.cookie).then(r=>r.json())).messages.at(-1).text,'message-53');
+    assert.equal((await request('friends')).status,401);
+    assert.equal((await request('friends',null,{userId:bob.user.id})).status,401);
+    assert.equal((await request('friends',alice.cookie).then(r=>r.json())).friends.length,0);
+    assert.equal((await request('friends',alice.cookie,{userId:alice.user.id})).status,400);
+    assert.equal((await request('friends',alice.cookie,{userId:'missing'})).status,400);
+    const friendLive=await stream(alice.cookie); await friendLive.nextEvent();
+    const added=await request('friends',alice.cookie,{userId:bob.user.id,owner_id:eve.user.id});
+    assert.equal(added.status,201); const friend=(await added.json()).friend;
+    assert.equal(friend.name,bob.user.name); assert.equal(friend.email,undefined);
+    assert.match(await friendLive.nextEvent(),/event: sync/);
+    assert.equal((await request('friends',alice.cookie,{userId:bob.user.id})).status,200);
+    assert.equal((await request('friends',alice.cookie).then(r=>r.json())).friends.length,1);
+    assert.equal((await request('friends',bob.cookie).then(r=>r.json())).friends.length,0,'saving is personal, not mutual');
+    assert.equal((await request('friends',eve.cookie).then(r=>r.json())).friends.length,0,'owner comes from session');
+    await request('friends',eve.cookie,{userId:bob.user.id});
+    await request('friends/remove',eve.cookie,{userId:bob.user.id,owner_id:alice.user.id});
+    assert.equal((await request('friends',alice.cookie).then(r=>r.json())).friends.length,1,'another user cannot remove my friend');
+    controllers.forEach(c=>c.abort()); await stop(); await start();
+    const savedFriends=(await request('friends',alice.cookie).then(r=>r.json())).friends;
+    assert.equal(savedFriends[0].id,bob.user.id); assert.equal(savedFriends[0].created_at,friend.created_at);
+    const newLogin=await request('login',null,{email:'alice@example.com',password:'test-password-12345'});
+    const otherDevice=newLogin.headers.get('set-cookie').split(';')[0];
+    assert.equal((await request('friends',otherDevice).then(r=>r.json())).friends[0].id,bob.user.id);
+    assert.equal((await request('friends/remove',otherDevice,{userId:bob.user.id})).status,200);
+    assert.equal((await request('friends',alice.cookie).then(r=>r.json())).friends.length,0);
+    assert.equal((await request(path,alice.cookie).then(r=>r.json())).messages.at(-1).text,'message-53','friend removal preserves existing chat');
+    assert.equal((await request(groupPath,alice.cookie).then(r=>r.json())).messages.length,3);
     const integrity=new DatabaseSync(join(dir,'chat.sqlite')); assert.equal(integrity.prepare('PRAGMA foreign_key_check').all().length,0); integrity.close();
   } finally { controllers.forEach(c => c.abort()); if (child && child.exitCode === null) await stop(); await rm(dir, { recursive: true, force: true }); }
 });
