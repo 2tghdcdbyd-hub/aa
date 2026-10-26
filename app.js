@@ -3,6 +3,7 @@ let account = null, conversations = [], active = null, source = null;
 let generation = 0, syncRunning = false, syncAgain = false, sending = false;
 let selectionVersion = 0, searchVersion = 0, pendingSend = null;
 const histories = new Map();
+let lastScrollTop = 0;
 let roomMode = 'direct', groupCreating = false;
 const selectedMembers = new Map();
 const current = () => conversations.find(c => c.id === active);
@@ -47,9 +48,14 @@ function renderList() {
 function renderMessages({ bottom = false } = {}) {
   const log = $('#messages'), c = current(), history = histories.get(active);
   const previousHeight = log.scrollHeight, previousTop = log.scrollTop;
+  const sameConversation = log.dataset.conversationId === active;
   const nearBottom = previousHeight - previousTop - log.clientHeight < 90;
+  const anchor = sameConversation && !bottom ? [...log.querySelectorAll('[data-message-id]')].find(row => row.getBoundingClientRect().bottom > log.getBoundingClientRect().top) : null;
+  const anchorId = anchor?.dataset.messageId;
+  const anchorOffset = anchor ? anchor.getBoundingClientRect().top - log.getBoundingClientRect().top : 0;
+  log.dataset.conversationId = active || '';
   log.replaceChildren();
-  if (!c) { log.append(element('p', 'welcome', '친구를 찾아 첫 대화를 시작해 보세요 👋')); return; }
+  if (!c) { log.append(element('p', 'welcome', '친구를 찾아 첫 대화를 시작해 보세요 👋')); $('#latest-messages').hidden = true; return; }
   if (!history) { log.append(element('p', 'welcome', '대화를 불러오는 중…')); return; }
   if (history.hasMore) {
     const more = element('button', 'load-more', history.loading ? '불러오는 중…' : '이전 메시지 보기');
@@ -68,7 +74,13 @@ function renderMessages({ bottom = false } = {}) {
     content.append(element('div', 'bubble', message.text), element('time', '', clock(message.created_at)));
     row.dataset.messageId = message.id; row.append(content); log.append(row);
   }
-  log.scrollTop = bottom || nearBottom ? log.scrollHeight : previousTop;
+  if (bottom || (!history.loading && nearBottom)) log.scrollTop = log.scrollHeight;
+  else {
+    const restored = anchorId ? log.querySelector(`[data-message-id="${anchorId}"]`) : null;
+    log.scrollTop = restored ? previousTop + restored.getBoundingClientRect().top - log.getBoundingClientRect().top - anchorOffset : previousTop;
+  }
+  lastScrollTop = log.scrollTop;
+  updateScrollButton();
 }
 function renderHeader() {
   const c = current();
@@ -89,7 +101,7 @@ function mergeHistory(id, data) {
   for (const message of data.messages) merged.set(message.id, message);
   // If more than one page arrived while offline, reload from the latest page so no unseen gap is hidden.
   const gap = previous?.messages.length && data.hasMore && data.messages.length && data.messages[0].id > previous.messages.at(-1).id;
-  histories.set(id, { messages: gap ? data.messages : [...merged.values()].sort((a, b) => a.id - b.id), hasMore: gap || !previous?.messages.length ? data.hasMore : previous.hasMore, loading: false });
+  histories.set(id, { messages: gap ? data.messages : [...merged.values()].sort((a, b) => a.id - b.id), hasMore: gap || !previous?.messages.length ? data.hasMore : previous.hasMore, loading: previous?.loading || false });
 }
 async function refreshConversation(id, epoch, { bottom = false } = {}) {
   const result = await chatRequest(`conversations/${id}/messages`);
@@ -130,15 +142,14 @@ async function loadEarlier() {
   const id = active, epoch = generation, history = histories.get(id);
   if (!history?.hasMore || history.loading) return;
   history.loading = true; renderMessages();
-  const top = $('#messages').scrollTop, height = $('#messages').scrollHeight;
   try {
     const result = await chatRequest(`conversations/${id}/messages?before=${history.messages[0].id}`);
     if (epoch !== generation) return;
     const merged = new Map(histories.get(id).messages.map(m => [m.id, m]));
     for (const m of result.messages) merged.set(m.id, m);
     histories.set(id, { messages: [...merged.values()].sort((a, b) => a.id - b.id), hasMore: result.hasMore, loading: false });
-    if (active === id) { renderMessages(); $('#messages').scrollTop = top + $('#messages').scrollHeight - height; }
-  } catch (error) { if (epoch === generation) { history.loading = false; chatError(error.message); if (active === id) renderMessages(); } }
+    if (active === id) renderMessages();
+  } catch (error) { if (epoch === generation) { if (histories.has(id)) histories.get(id).loading = false; chatError(error.message); if (active === id) renderMessages(); } }
 }
 function connectEvents() {
   source?.close(); const epoch = generation;
@@ -164,6 +175,7 @@ function clearAccount() {
   account = null; conversations = []; active = null; histories.clear();
   syncRunning = false; syncAgain = false; sending = false; pendingSend = null;
   $('#message-input').value = ''; $('#messages').replaceChildren(); $('#contacts').replaceChildren();
+  $('#latest-messages').hidden = true; lastScrollTop = 0;
   $('#friend-results').replaceChildren(); $('#friend-error').textContent = ''; $('#emoji-picker').hidden = true;
   $('#retry-sync').hidden = true; chatError(); $('.shell').classList.remove('chat-open');
   if ($('#new-dialog').open) $('#new-dialog').close();
@@ -303,4 +315,19 @@ $('#create-group').onclick = async () => {
   finally {
     if (epoch === generation) { groupCreating = false; updateGroupSelection(); $('#direct-mode').disabled = false; $('#group-mode').disabled = false; }
   }
+};
+
+function updateScrollButton() {
+  const log = $('#messages');
+  $('#latest-messages').hidden = !active || log.scrollHeight - log.scrollTop - log.clientHeight < 90;
+}
+$('#messages').addEventListener('scroll', () => {
+  const log = $('#messages');
+  const movingUp = log.scrollTop < lastScrollTop;
+  lastScrollTop = log.scrollTop;
+  updateScrollButton();
+  if (movingUp && log.scrollTop < 100 && histories.get(active)?.hasMore) loadEarlier();
+}, { passive: true });
+$('#latest-messages').onclick = () => {
+  $('#messages').scrollTo({ top: $('#messages').scrollHeight, behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' });
 };
