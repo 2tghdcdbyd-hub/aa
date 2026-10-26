@@ -1,1 +1,14 @@
-{"name":"pingo-chat","version":"1.0.0","private":true,"scripts":{"start":"node server.mjs","dev":"node server.mjs","check":"node --check app.js && node --check server.mjs"}}
+{
+  "name": "pingo-chat",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "start": "node server.mjs",
+    "dev": "node server.mjs",
+    "check": "node --check app.js && node --check auth.js && node --check server.mjs",
+    "test": "node --test test/auth.test.mjs"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}
