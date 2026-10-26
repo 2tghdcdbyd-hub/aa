@@ -5,7 +5,7 @@
   "scripts": {
     "start": "node server.mjs",
     "dev": "node server.mjs",
-    "check": "node --check app.js && node --check auth.js && node --check server.mjs && node --check chat.mjs && node --check safety.js && node --check safety.mjs && node --check recovery.mjs && node --check moderation.mjs",
+    "check": "node --check app.js && node --check auth.js && node --check server.mjs && node --check chat.mjs && node --check safety.js && node --check safety.mjs && node --check recovery.mjs && node --check moderation.mjs && node --check moderation-format.mjs",
     "test": "node --test test/*.test.mjs",
     "moderate": "node moderation.mjs"
   },

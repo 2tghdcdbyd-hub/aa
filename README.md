@@ -40,11 +40,26 @@ npm start
 운영자는 **서버 호스트 접근 권한**으로 아래 명령을 실행합니다. 웹에 관리자 API나 기본 관리자 비밀번호를 노출하지 않습니다.
 
 ```sh
+# 기본 목록: 검토 대기 우선, 20건씩, 한글 표/좁은 터미널 카드 표시
 npm run moderate -- list
+
+# 대기 중인 신고만, 스팸만, 이름·설명 검색
+npm run moderate -- list --status open
+npm run moderate -- list --status open --reason spam
+npm run moderate -- list --search "민준"
+
+# 페이지 이동 / 상세 조회 (고유한 ID 앞 8자리 이상 사용 가능)
+npm run moderate -- list --page 2 --limit 20
 npm run moderate -- show <신고ID>
 npm run moderate -- resolve <신고ID> "검토 결과와 조치 기록"
 npm run moderate -- dismiss <신고ID> "종결 사유"
 ```
+
+목록 상단에는 전체 상태별 건수와 현재 검색 결과·페이지를 표시합니다. 열에는 신고 ID, 한글 상태·사유, 신고자·대상 이름, 한국 시간(KST), 설명 미리보기가 나옵니다. 상세 조회에서는 전체 ID, 신고 설명, 메시지 증거와 검토 이력을 구분해 표시합니다. 이름·긴 설명은 목록에서만 생략하며, `show`에서 전체 내용을 확인할 수 있습니다.
+
+기본 상태는 `all`이고 `open`(검토 대기), `resolved`(처리 완료), `dismissed`(종결)로 필터링합니다. `--reason`은 `spam`, `harassment`, `abuse`, `illegal`, `other`를 지원합니다. 검색은 신고자·대상 이름과 신고 설명에 적용됩니다. 페이지 크기는 기본 20건, 최대 100건이며, 다음 페이지를 볼 때 기존 필터를 함께 지정하세요.
+
+`--width 80`으로 출력 폭을 지정할 수 있습니다(60~200). 폭 96 이상은 표, 더 좁으면 카드로 표시합니다. 한글·이모지 폭을 반영해 정렬하고 신고 내용에 포함된 터미널 제어 문자는 안전한 문자 표현으로 바꿉니다. `list --json`과 `show <ID> --json`은 자동화용 JSON을 출력합니다. 전체 옵션은 `npm run moderate -- --help`로 확인하세요. 앞 8자리가 중복되는 신고는 조회·처리를 거부하므로 더 긴 ID를 사용해야 합니다.
 
 다른 DB를 사용하는 경우 동일한 `PINGO_DB_PATH`를 지정하세요. 검토 상태·시각·메모를 보관하며 이 명령은 계정을 자동 제재하지 않습니다. 실제 운영자는 대기열을 주기적으로 확인해야 합니다. 신고 증거·설명은 개인정보가 포함될 수 있으므로 DB 접근·백업 권한과 보관 기간을 관리하세요.
 
